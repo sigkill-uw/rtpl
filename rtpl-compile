@@ -1,0 +1,225 @@
+#!/usr/bin/env python
+
+#Usage: rtpl-compile [input file = stdin] [output file = stdout
+
+#This is a really crappy templating engine written by sigkill. Text is interspersed with Python code in a way similar to PHP.
+#A body of Python code is opened with '<%' and closed with '%>'.
+
+#In order to avoid having to have a hellish scheme of indentation the compiler ignores 'extraneous' whitespace.
+#That is to say that, unlike in generic Python, whitespace is mostly meaningless.
+#In order to dilleneate blocks that would generally be indented, the compiler will interpret a trailing semicolon on a line
+#as a signal to indent. The keyword 'end' is a signal to dedent.
+
+#The 'end' keyword should not be used if a control structure is written across a single line.
+#For instance:
+#	if foo: bar()
+#The above statement would not requre the use of the 'end' keyword/
+
+#On the other hand:
+#	if foo:
+#		bar()
+#	end
+#	else
+#		baz()
+#	end
+#The above statement requires two 'end' keywords. Yes, this is verbose, but it keeps the KISS rule intact.
+
+#In addition to the generic <% %> tags, the <%= tag exists to provide a less verbose mechanism for returning a single expression.
+#Python code immediately following said tag will be prefixed with "yield ". This of course is only useful in the context of function.
+
+#Pitfalls:
+#	Text is only parsed when the compiler has a tab depth >0. This is intended mostly to enforce wrapping of text in functions.
+#	However, template creators could maliciously or inadvertently wrap their text in any other block. This is not useful behaviour,
+#	but it is again left in for the sake of the KISS rule.
+#	In a similar vein, pretty much any Python syntax error will cause your template output to be mangled and unusable.
+#	If any body of code lacks a closing '%>' tag, it will not be compiled.
+#	It bears repeating: if/elif/else blocks will usually require more than one 'end' keyword. Yes, it's weird.
+#	The compiler will not emit errors for unclosed Python tags, missing or extraneous end keywords, Python syntax errors,
+#	yield statements outside of functions, the use of end keywords outside of the correct context... etc.
+#	Using untrusted templates is akin to running untrusted code. Don't do it.
+#Although none of these flaws would be acceptable in a piece of production software, in the context of a hacked-up standalone
+#homebrew, I'd like to pretend that they are features rather than bugs.
+
+from sys import argv, stdin, stdout
+from StringIO import StringIO
+import tokenize
+
+class Compiler:
+	def __init__(self, input_file = stdin, output_file = stdout):
+		#IO
+		self.input			= input_file
+		self.output			= output_file
+		
+		#Indicator for the toplevel compiler function - is the next read going to be Python or raw text?
+		self.in_python		= False
+		
+		#Buffer for the compiler - since the reader may not necessarily deliver a full 'body' of Python code
+		self.code_buffer	= ''
+		
+		#Current tab depth for compiler
+		self.tab_depth		= 0
+		
+		#Data for the previously handled token
+		self.last_type = None
+		self.last_string = None
+		
+		#Check for whether or not we've indented already
+		self.indented = False
+	
+	#Compile raw text - basically just wrap it into a yield statement
+	def _compile_text(self, text):
+		#Ignore empty lines - don't ignore whitespace, since it could be significant in the output
+		#Also we ignore anything not wrapped in a function. I really don't know if that makes sense or not.
+		if text and self.tab_depth > 0:
+			#Wrap the text in a yield "%s", being sure to escape the quotes
+			self.output.write(('\t' * self.tab_depth if not self.indented else "") + "yield \"" +
+				text.replace('\\', '\\\\')
+				.replace('\n', '\\n')
+				.replace('"', '\\"')
+				+ "\"\n")
+			self.indented = False
+	
+	#Compile Python code
+	def _compile_code(self, code):
+		#Ignore blanks
+		if not code.strip():
+			return
+		
+		#If the code body is of the form <%=  ... %>, the expression immediately following the <%= shall simply be yielded
+		if code[0] == '=':
+			code = "yield " + code[1:]
+		
+		#Tab over for the first line
+		if not self.indented:
+			self.output.write('\t' * self.tab_depth)
+			self.indented = True
+		
+		#Iterate over tokens in code body
+		for ttype, tstring, _, _, _ in tokenize.generate_tokens(StringIO(code).readline):
+			#Check for block end statement - dedent
+			if ttype == tokenize.NAME and tstring == "end":
+				self.tab_depth -= 1
+			#Ignore semicolons if they follow an 'end' statement
+			elif (ttype == tokenize.SEMI or tstring == ';') and self.last_string == "end":
+				pass
+			#Ignore whitespace
+			elif ttype != tokenize.NEWLINE and not tstring.strip():
+				pass
+			else:
+				#If we hit a newline,
+				if ttype == tokenize.NEWLINE:
+					#If the last character was a colon we have to indent
+					if self.last_type == tokenize.COLON or self.last_string == ':':
+						self.tab_depth += 1
+					
+					#Tab over
+					self.output.write('\n' + ('\t' * self.tab_depth))
+					self.indented = True
+				else:
+					#Just write the token with a space.
+					#It produces ugly code, but I'm pretty sure it'll never cause a syntax error
+					self.output.write(tstring + ' ')
+					self.indented = False
+			
+			#Set the identifiers for the previous token - ignoring certain exceptions
+			if ttype not in (tokenize.ERRORTOKEN, tokenize.ENDMARKER, tokenize.INDENT, tokenize.DEDENT):
+				self.last_type = ttype
+				self.last_string = tstring
+		
+		#If we haven't written a newline, write one. Also handle a possible trailing colon.
+		if self.last_type != tokenize.NEWLINE:
+			self.output.write('\n')
+			self.indented = False
+			if self.last_type == tokenize.COLON or self.last_string == ':':
+				self.tab_depth += 1
+	
+	#Compile a line of text, Python, or both
+	def _compile_line(self, line):
+		#If we're not in Python, we can just write the beginning of the line - up until the beginning of code
+		if not self.in_python:
+			#Ignore blanks
+			if not line: return
+			
+			#Find a potential opening Python tag
+			tag_position = line.find("<%")
+			
+			#If there is no opening tag, just write the entire line as text
+			if tag_position == -1:
+				self._compile_text(line)
+				return
+
+			#Otherwise we have to contend with some Python code as well.
+			#Write the text portion, and trim the line down to the next Python component
+			self._compile_text(line[:tag_position])
+			line = line[tag_position + 2:]
+		
+		if line:
+			#If we reach this point we have Python to handle
+			self.in_python = True
+			
+			#Seek the closing tag. We need to check that it's not within a Python quoted string also.
+			start = 0
+			while True:
+				next = line.find("%>", start)
+				#If there is no closing tag, OR if there's an un-quoted closing tag, break out
+				if next == -1 or not self._check_for_unclosed_quotes(line[start:next]):
+					break
+			
+				start = next + 2
+			
+			#If no closing tag was found, buffer the code found thus far. We need more before we can compile.
+			#This means that code in an un-closed body won't be compiled. This could be fixed in run(). TODO
+			if next == -1:
+				self.code_buffer += line
+			else:
+				#Compile the code, reset the Python indicators, and recur to possibly handle the remainder of the line
+				self._compile_code(self.code_buffer + line[:next])
+				self.code_buffer = ''
+				self.in_python = False
+				self._compile_line(line[next + 2:])
+	
+	#Check if the text contains an un-terminated quoted string. Works by sheer coincidence with triple quotes also
+	def _check_for_unclosed_quotes(self, text):
+		#Current quote character, or false if not quoted
+		quote = False
+		
+		#True if last character was '\\'
+		escape = False
+		
+		#Iterate over text
+		for i in range(len(text)):
+			#Ignore escaped characters
+			if escape:
+				escape = False
+				continue
+			
+			#Check if we need to unquote
+			if quote:
+				if text[i] == quote:
+					quote = False
+				elif text[i] == '\\':
+					escape = True
+			else:
+				#Possibly quote
+				if text[i] == '\'' or text[i] == '"':
+					quote = text[i]
+		
+		return bool(quote)
+	
+	#Run the compiler
+	def run(self):
+		#Iterate over input
+		for line in self.input:
+			#Compile each line
+			self._compile_line(line)
+
+#If we're run from the CLI,
+if __name__ == '__main__':
+	length = len(argv)
+	if length == 2:
+		Compiler(open(argv[1], "r")).run() #compile input.rtpl
+	elif length == 3:
+		Compiler(open(argv[1], "r"), open(argv[2], "w")).run() #compile input.rtpl output.py
+	else:
+		Compiler() #compile <input >output
+		

@@ -1,0 +1,35 @@
+<% def header(title = None):
+%><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+	<head>
+		<title><%
+			if not title:
+				yield "rtpl example page"
+			end
+			else:
+				yield title
+			end	%></title>
+	</head>
+	<body>
+<% end %>
+
+<% def footer(): %>
+	</body>
+<html>
+<% end %>
+
+<%
+import itertools
+def page(title = None, content = None):
+	if not content:
+		content = ["\t\t<p> Example rtpl content </p>"]
+	end
+	
+	for i in itertools.chain(header(title), content, footer()): yield i
+end
+
+if __name__ == '__main__':
+	from sys import stdout
+	for x in page(): stdout.write(x)
+end
+%>
