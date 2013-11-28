@@ -69,6 +69,10 @@ class Compiler:
 		
 		#Check for whether or not we've indented already
 		self.indented = False
+		
+	def __del__(self):
+		if self.input != stdin: self.input.close()
+		if self.output != stdout: self.output.close()
 	
 	#Compile raw text - basically just wrap it into a yield statement
 	def _compile_text(self, text):
