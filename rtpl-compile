@@ -41,8 +41,12 @@
 #homebrew, I'd like to pretend that they are features rather than bugs.
 
 from sys import argv, stdin, stdout
-from StringIO import StringIO
 import tokenize
+
+try:
+	from StringIO import StringIO
+except:
+	from io import StringIO
 
 class Compiler:
 	def __init__(self, input_file = stdin, output_file = stdout):
